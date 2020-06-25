@@ -46,6 +46,7 @@ class LoopSymbolSet(SymbolSet):
       self.__symbols_for_direction[dj].append(idx)
       self.__symbol_for_direction_pair[(di, dj)] = idx
       self.__symbol_for_direction_pair[(dj, di)] = idx
+      # For n directions, nC2.
       self.__max_loop_symbol_index = idx
 
   def is_loop(self, symbol: ArithRef) -> BoolRef:
@@ -111,6 +112,12 @@ class LoopConstrainer:
       self.__add_single_loop_constraints()
 
   def __add_loop_edge_constraints(self):
+    """Internal: A loop exiting a cell must enter a neighbor cell.
+    
+    If e.g. a loop exits down, the cell to the south must have an exit up.
+    This method expresses those constraints, and ensures that the path
+    is a loop.
+    """
     solver = self.__symbol_grid.solver
     sym: LoopSymbolSet = self.__symbol_grid.symbol_set
 
@@ -129,33 +136,52 @@ class LoopConstrainer:
             solver.add(cell != s)
 
   def __all_direction_pairs(self) -> Iterable[Tuple[int, Vector, Vector]]:
+    """Internal: Generator of all possible direction pairs."""
     dirs = self.__symbol_grid.lattice.edge_sharing_directions()
     for idx, ((_, di), (_, dj)) in enumerate(itertools.combinations(dirs, 2)):
       yield (idx, di, dj)
 
   def __add_single_loop_constraints(self):
+    """Internal: There must be exactly one loop in the grid.
+    
+    This method uses the concept of a 'loop order'. """
     solver = self.__symbol_grid.solver
     sym: LoopSymbolSet = self.__symbol_grid.symbol_set
 
     cell_count = len(self.__symbol_grid.grid)
 
+    # Loop orders are constrained in [-cell_count, cell_count)
     for p in self.__symbol_grid.grid:
       v = Int(f"log-{LoopConstrainer._instance_index}-{p.y}-{p.x}")
       solver.add(v >= -cell_count)
       solver.add(v < cell_count)
       self.__loop_order_grid[p] = v
 
+    # All loop orders must be distinct
     solver.add(Distinct(*self.__loop_order_grid.values()))
 
     for p, cell in self.__symbol_grid.grid.items():
       li = self.__loop_order_grid[p]
 
+      # Cells on the loop have positive loop order, cells not on the loop
+      # have negative loop order.
       solver.add(If(sym.is_loop(cell), li >= 0, li < 0))
 
+      # Look at all possible cells that can come before / after on the path.
       for idx, d1, d2 in self.__all_direction_pairs():
         pi = p.translate(d1)
         pj = p.translate(d2)
         if pi in self.__loop_order_grid and pj in self.__loop_order_grid:
+          # If the cell is using this direction pair (cell == idx)
+          # AND the cell is on the loop (and not 0), one of the cells before /
+          # after must be offset by 1 from this cell. Imagine indicating the
+          # 'start' of the loop with loop order 0. This forces a
+          # 'directionality' on the loop. Start at any arbitrary point on the
+          # loop, this condition means that you must be able to descend towards
+          # 0, while remaining on the loop. By descent, every cell must reach
+          # 0 while remaining on the loop, so every cell must be part of the
+          # same loop.
+
           solver.add(Implies(
               And(cell == idx, li > 0),
               Or(

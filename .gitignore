@@ -5,3 +5,5 @@ build/
 dist/
 docs/
 grilops.egg-info/
+.venv
+.env

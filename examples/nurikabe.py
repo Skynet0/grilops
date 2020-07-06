@@ -3,6 +3,7 @@
 Example puzzle can be found at https://en.wikipedia.org/wiki/Nurikabe_(puzzle).
 """
 
+import itertools
 from z3 import And, Implies, Int, Not
 
 import grilops
@@ -60,7 +61,7 @@ def constrain_sea(sym, sg, rc):
       sg.solver.add(Not(And(*[cell == sym.B for cell in pool_cells])))
 
 
-def constrain_islands(sym, sg, rc):
+def constrain_islands(sym, sg, rc, sea_root=None):
   """Add constraints to the island cells."""
   # Each numbered cell is an island cell. The number in it is the number of
   # cells in that island. Each island must contain exactly one numbered cell.
@@ -81,12 +82,18 @@ def constrain_islands(sym, sg, rc):
               rc.region_id_grid[p] == island_id,
               sg.cell_is(p, sym.W)
           ))
-        # Force a non-given white cell to not be the root of the region's tree,
-        # to reduce the number of possibilities.
-        sg.solver.add(Implies(
-            sg.cell_is(p, sym.W),
-            rc.parent_grid[p] != grilops.regions.R
-        ))
+        # If we placed a sea root, then all roots are accounted for, so any
+        # cell that is not a given and not the sea root is not a root.
+        if sea_root:
+          if p != sea_root:
+            sg.solver.add(rc.parent_grid[p] != grilops.regions.R)
+        else:
+          # Force a non-given white cell to not be the root of the region's tree,
+          # to reduce the number of possibilities.
+          sg.solver.add(Implies(
+              sg.cell_is(p, sym.W),
+              rc.parent_grid[p] != grilops.regions.R
+          ))
 
 
 def constrain_adjacent_cells(sg, rc):
@@ -107,6 +114,43 @@ def constrain_adjacent_cells(sg, rc):
         )
 
 
+def constrain_trivial_deductions(sym, sg, rc):
+  """Constrain 1's and adjacents. Return sea root, if determined."""
+  known_shaded = set()
+  for y, x in GIVENS.keys():
+    p = Point(y, x)
+    # 1's are surrounded by black squares
+    if GIVENS[p] == 1:
+      for n in sg.lattice.edge_sharing_points(p):
+        if n in sg.grid:
+          sg.solver.add(sg.cell_is(n, sym.B))
+          known_shaded.add(n)
+    else:
+      # Check two-step lateral offsets
+      for _, d in sg.lattice.edge_sharing_directions():
+        n = p.translate(d)
+        if n.translate(d) in GIVENS:
+          sg.solver.add(sg.cell_is(n, sym.B))
+          known_shaded.add(n)
+      # Check two-step diagonal offsets
+      for (_, di), (_, dj) in itertools.combinations(sg.lattice.edge_sharing_directions(), 2):
+        dn = p.translate(di).translate(dj)
+        if dn != p and dn in GIVENS:
+          n1, n2 = p.translate(di), p.translate(dj)
+          sg.solver.add(sg.cell_is(n1, sym.B))
+          sg.solver.add(sg.cell_is(n2, sym.B))
+          known_shaded.update((n1, n2))
+
+  # Root the sea at a known shaded cell to reduce possibilities
+  if len(known_shaded) >= 1:
+    p = known_shaded.pop()
+    sg.solver.add(rc.parent_grid[p] == grilops.regions.R)
+    sg.solver.add(rc.region_size_grid[p] == HEIGHT * WIDTH - sum(GIVENS.values()))
+    return p
+
+  return None
+
+
 def main():
   """Nurikabe solver example."""
   sym = grilops.SymbolSet([("B", chr(0x2588)), ("W", " ")])
@@ -119,8 +163,9 @@ def main():
       max_region_size=HEIGHT * WIDTH - sum(GIVENS.values())
   )
 
+  sea_root = constrain_trivial_deductions(sym, sg, rc)
   constrain_sea(sym, sg, rc)
-  constrain_islands(sym, sg, rc)
+  constrain_islands(sym, sg, rc, sea_root=sea_root)
   constrain_adjacent_cells(sg, rc)
 
   def print_grid():
